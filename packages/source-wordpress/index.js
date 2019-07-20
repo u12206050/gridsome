@@ -1,10 +1,26 @@
 const pMap = require('p-map')
 const axios = require('axios')
+const fs = require('fs')
+const https = require('https')
+const path = require('path')
 const camelCase = require('camelcase')
-const { mapKeys, isPlainObject, trimEnd } = require('lodash')
+const { mapKeys, isPlainObject, trimEnd, map, find } = require('lodash')
 
 const TYPE_AUTHOR = 'author'
 const TYPE_ATTACHEMENT = 'attachment'
+const TMPDIR = '.temp/downloads'
+const DOWNLOAD_DIR = 'wp-images'
+
+function mkdirSyncRecursive (absDirectory) {
+  const paths = absDirectory.replace(/\/$/, '').split('/')
+  paths.splice(0, 1)
+
+  let dirPath = '/'
+  paths.forEach(segment => {
+    dirPath += segment + '/'
+    if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath)
+  })
+}
 
 class WordPressSource {
   static defaultOptions () {
@@ -13,29 +29,46 @@ class WordPressSource {
       apiBase: 'wp-json',
       perPage: 100,
       concurrent: 10,
-      typeName: 'WordPress'
+      routes: {
+        post: '/:slug',
+        post_tag: '/tag/:slug',
+        category: '/category/:slug',
+        author: '/author/:slug'
+      },
+      typeName: 'WordPress',
+      splitPostsIntoFragments: false,
+      downloadRemoteImagesFromPosts: false,
+      downloadRemoteFeaturedImages: false,
+      downloadACFImages: false
     }
   }
 
   constructor (api, options) {
-    this.options = options
+    const opts = this.options = { ...WordPressSource.defaultOptions, ...options }
     this.restBases = { posts: {}, taxonomies: {}}
 
-    if (!options.typeName) {
+    if (!opts.typeName) {
       throw new Error(`Missing typeName option.`)
     }
 
-    if (options.perPage > 100 || options.perPage < 1) {
-      throw new Error(`${options.typeName}: perPage cannot be more than 100 or less than 1.`)
+    if (opts.perPage > 100 || opts.perPage < 1) {
+      throw new Error(`${opts.typeName}: perPage cannot be more than 100 or less than 1.`)
     }
 
-    const baseUrl = trimEnd(options.baseUrl, '/')
+    const baseUrl = trimEnd(opts.baseUrl, '/')
 
     this.client = axios.create({
-      baseURL: `${baseUrl}/${options.apiBase}`
+      baseURL: `${baseUrl}/${opts.apiBase}`
     })
 
     this.routes = this.options.routes || {}
+
+    /* Create image directories */
+    mkdirSyncRecursive(path.resolve(DOWNLOAD_DIR))
+    mkdirSyncRecursive(path.resolve(TMPDIR))
+    this.tmpCount = 0
+
+    this.slugify = str => api.store.slugify(str).replace(/-([^-]*)$/, '.$1')
 
     api.loadSource(async actions => {
       this.store = actions
@@ -60,7 +93,7 @@ class WordPressSource {
 
       addCollection({
         typeName: this.createTypeName(type),
-        route: this.routes[type]
+        route: this.routes[type] || `/${type}/:slug`
       })
     }
   }
@@ -80,7 +113,8 @@ class WordPressSource {
 
       authors.addNode({
         ...fields,
-        id: author.id,
+        id: actions.makeUid(`author:${author.id}`),
+        wpId: author.id,
         title: author.name,
         avatars
       })
@@ -104,7 +138,8 @@ class WordPressSource {
 
       for (const term of terms) {
         taxonomy.addNode({
-          id: term.id,
+          id: actions.makeUid(`term:${term.id}`),
+          wpId: term.id,
           title: term.name,
           slug: term.slug,
           content: term.description,
@@ -112,6 +147,94 @@ class WordPressSource {
         })
       }
     }
+  }
+
+  extractImagesFromPostHtml (string) {
+    const regex = /<img[^>]* src=\"([^\"]*)\" alt=\"([^\"]*)\"[^>]*>/gm
+
+    const matches = []
+    let m
+    while ((m = regex.exec(string)) !== null) {
+      // This is necessary to avoid infinite loops with zero-width matches
+      if (m.index === regex.lastIndex) {
+        regex.lastIndex++
+      }
+
+      // The result can be accessed through the `m`-variable.
+      m.forEach((match, groupIndex) => {
+        matches.push({
+          url: match[1],
+          alt: match[2]
+        })
+      })
+    }
+
+    return matches
+  }
+
+  async downloadImage (url, destPath, fileName) {
+    const imagePath = path.resolve(destPath, fileName)
+
+    try {
+      if (fs.existsSync(imagePath)) return
+    } catch (err) {
+      console.log(err)
+    }
+
+    const tmpPath = path.resolve(TMPDIR, `${++this.tmpCount}.tmp`)
+
+    return new Promise(function (resolve, reject) {
+      const file = fs.createWriteStream(tmpPath)
+      https.get(url, (response) => {
+        response.pipe(file)
+        file.on('finish', () => {
+          file.close()
+          fs.rename(tmpPath, imagePath, resolve)
+        })
+      }).on('error', (err) => {
+        console.error(err.message)
+        fs.unlinkSync(tmpPath) // Cleanup blank file
+        reject(err)
+      })
+    })
+  }
+
+  processPostFragments (post) {
+    const postImages = this.extractImagesFromPostHtml(post)
+
+    const regex = /<img[^>]* src=\"([^\"]*)\"[^>]*>/
+    const fragments = post.split(regex)
+
+    return map(fragments, (fragment, index) => {
+      const image = find(postImages, (image) => { return image.url === fragment })
+      if (image && this.options.downloadRemoteImagesFromPosts) {
+        const fileName = this.slugify(fragment.split('/').pop())
+        const imageData = {
+          type: 'img',
+          order: index + 1,
+          fragmentData: {
+            remoteUrl: fragment,
+            fileName: fileName,
+            image: path.resolve(DOWNLOAD_DIR, fileName),
+            alt: image.alt
+          }
+        }
+        this.downloadImage(
+          fragment,
+          DOWNLOAD_DIR,
+          fileName
+        )
+        return imageData
+      } else {
+        return {
+          type: 'html',
+          order: index + 1,
+          fragmentData: {
+            html: fragment
+          }
+        }
+      }
+    })
   }
 
   async getPosts (actions) {
@@ -126,11 +249,10 @@ class WordPressSource {
       const typeName = this.createTypeName(type)
       const posts = getCollection(typeName)
 
-      const data = await this.fetchPaged(`wp/v2/${restBase}`)
+      const data = await this.fetchPaged(`wp/v2/${restBase}?_embed`)
 
       for (const post of data) {
         const fields = this.normalizeFields(post)
-
         fields.author = createReference(AUTHOR_TYPE_NAME, post.author || '0')
 
         if (post.type !== TYPE_ATTACHEMENT) {
@@ -150,7 +272,29 @@ class WordPressSource {
           }
         }
 
-        posts.addNode({ ...fields, id: post.id })
+        if (this.options.splitPostsIntoFragments && fields['content']) { fields.postFragments = this.processPostFragments(fields['content']) }
+
+        // download the featured image
+        if (this.options.downloadRemoteFeaturedImages && post._embedded && post._embedded['wp:featuredmedia']) {
+          try {
+            const featuredImageFileName = this.slugify(post._embedded['wp:featuredmedia']['0'].source_url.split('/').pop())
+            await this.downloadImage(
+              post._embedded['wp:featuredmedia']['0'].source_url,
+              DOWNLOAD_DIR,
+              featuredImageFileName
+            )
+            fields.featuredMediaImage = path.resolve(DOWNLOAD_DIR, featuredImageFileName)
+          } catch (err) {
+            console.log(err)
+            console.log('WARNING - No featured image for post ' + post.slug)
+          }
+        }
+
+        posts.addNode({
+          ...fields,
+          id: actions.makeUid(`post:${post.id}`),
+          wpId: post.id
+        })
       }
     }
   }
@@ -223,27 +367,39 @@ class WordPressSource {
     })
   }
 
-  normalizeFields (fields) {
+  normalizeFields (fields, isACF) {
     const res = {}
 
     for (const key in fields) {
       if (key.startsWith('_')) continue // skip links and embeds etc
-      res[camelCase(key)] = this.normalizeFieldValue(fields[key])
+      res[camelCase(key)] = this.normalizeFieldValue(fields[key], isACF || key === 'acf')
     }
 
     return res
   }
 
-  normalizeFieldValue (value) {
+  normalizeFieldValue (value, isACF) {
     if (value === null) return null
     if (value === undefined) return null
 
     if (Array.isArray(value)) {
-      return value.map(v => this.normalizeFieldValue(v))
+      return value.map(v => this.normalizeFieldValue(v, isACF))
     }
 
     if (isPlainObject(value)) {
-      if (value.post_type && (value.ID || value.id)) {
+      if (value.type === 'image' && value.filename && value.url && isACF && this.options.downloadACFImages) {
+        const filename = this.slugify(value.filename)
+        this.downloadImage(
+          value.url,
+          DOWNLOAD_DIR,
+          filename
+        )
+        return {
+          src: path.resolve(DOWNLOAD_DIR, filename),
+          title: value.title,
+          alt: value.description
+        }
+      } else if (value.post_type && (value.ID || value.id)) {
         const typeName = this.createTypeName(value.post_type)
         const id = value.ID || value.id
 
@@ -257,7 +413,18 @@ class WordPressSource {
         return value.rendered
       }
 
-      return this.normalizeFields(value)
+      return this.normalizeFields(value, isACF)
+    }
+
+    if (isACF && this.options.downloadACFImages && String(value).match(/^https:\/\/.*\/.*\.(jpg|png|svg|jpeg)($|\?)/i)) {
+      const filename = this.slugify(value.split('/').pop())
+      console.log(`Downloading ${filename}`)
+      this.downloadImage(
+        value,
+        DOWNLOAD_DIR,
+        filename
+      )
+      return path.resolve(DOWNLOAD_DIR, filename)
     }
 
     return value

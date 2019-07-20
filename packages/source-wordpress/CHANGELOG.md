@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# 0.4.12 Fixed downloading of images with strange characteristics
+
+This fixes a bug whereby some images are not downloaded because of non-standard characters in their filename. All filenames are now santized.
+
+# 0.4.11 Download all image urls found within posts
+
+Downloads both image objects and image urls.
+
+# 0.4.8 Added support for ACF images.
+
+To enable add `downloadACFImages: true` to the plugin's options in your config.
+
+
+# 0.4.7 Removed folder options. Will always download now to `wp-images`.
+
 ## [0.4.1](https://github.com/gridsome/gridsome/tree/master/packages/source-wordpress/compare/@gridsome/source-wordpress@0.4.0...@gridsome/source-wordpress@0.4.1) (2019-09-17)
 
 
@@ -11,19 +26,12 @@ See [Conventional Commits](https://conventionalcommits.org) for commit guideline
 * **wordpress:** don’t add default routes ([6e7134f](https://github.com/gridsome/gridsome/tree/master/packages/source-wordpress/commit/6e7134f))
 
 
-
-
-
 # [0.4.0](https://github.com/gridsome/gridsome/tree/master/packages/source-wordpress/compare/@gridsome/source-wordpress@0.3.0...@gridsome/source-wordpress@0.4.0) (2019-09-11)
 
 
 ### Features
 
 * **wordpress:** basic gridsome v0.7 support ([8433c9a](https://github.com/gridsome/gridsome/tree/master/packages/source-wordpress/commit/8433c9a))
-
-
-
-
 
 # [0.3.0](https://github.com/gridsome/gridsome/tree/master/packages/source-wordpress/compare/@gridsome/source-wordpress@0.2.2...@gridsome/source-wordpress@0.3.0) (2019-05-10)
 
