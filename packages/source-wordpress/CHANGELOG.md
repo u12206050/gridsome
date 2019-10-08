@@ -3,6 +3,8 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+# 0.4.13 BREAKING: Removed wpId. Reverted back to id
+
 # 0.4.12 Fixed downloading of images with strange characteristics
 
 This fixes a bug whereby some images are not downloaded because of non-standard characters in their filename. All filenames are now santized.
